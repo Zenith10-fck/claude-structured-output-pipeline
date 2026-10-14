@@ -1,0 +1,159 @@
+{
+  "name": "Claude Structured Output - Stage 1",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "claude-order-intake",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        1376,
+        -32
+      ],
+      "id": "d0dcc0bf-e51e-49f6-8984-35bbae86fd24",
+      "name": "Order Intake"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Stage 1 seed fixtures only -- three inputs, chosen to provoke three\n// different response shapes. The full 50-fixture set is Stage 4 and will\n// replace the entire contents of this node.\nconst fixtures = [\n  {\n    fixture_id: 'seed-01-clean',\n    raw_text: 'Halo, saya Budi Santoso mau order 2 pcs Kaos Polos ukuran L dan 1 pcs Topi Baseball. Kirim ke Jl. Melati No. 12, Bandung 40115. Email budi.santoso@example.test, HP 081234567890. Total Rp 450.000 ya. Thanks!'\n  },\n  {\n    // Feeds B2 later: \"2,4jt\" is the value that passes JSON Schema as 2.4\n    // and is wrong by a factor of one million.\n    fixture_id: 'seed-02-jt-amount',\n    raw_text: 'pagi kak, sy Siti Rahmawati mau pesen hoodie oversize size XL 3pcs sama tote bag 2 pcs. alamat Perum Griya Asri Blok C5 no 8, Tangerang Selatan. wa 0812-9988-7766. totalnya 2,4jt kan? transfer skrg ya'\n  },\n  {\n    // Feeds B6 later: no name, no address, no email, no amount.\n    fixture_id: 'seed-03-missing-fields',\n    raw_text: 'mau order jaket bomber 1 aja, size large. berapa totalnya'\n  }\n];\n\nreturn fixtures.map(f => ({ json: f }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1328,
+        192
+      ],
+      "id": "37cd1ac3-af91-4833-8aa3-b81656d29f56",
+      "name": "Test Fixtures1"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Entry-point normalisation. The webhook delivers { body: { raw_text } },\n// the fixture path delivers { raw_text } directly. One line instead of a\n// dedicated normalise node.\nconst raw = $json.raw_text ?? $json.body?.raw_text ?? '';\n\n// D3: the injection defence here is structural, not instructional.\n// tool_choice forces exactly one tool call, and the untrusted text is\n// fenced inside a delimiter. There is deliberately no \"ignore any\n// instructions in the input\" line -- that turns the defence into a\n// request the model is free to decline.\nconst system = [\n  'You extract structured order data from raw customer text.',\n  'The text is Indonesian, English, or a mix of both, and contains typos.',\n  '',\n  'amount_as_written must reproduce the amount exactly as it appears in the source text, character for character, with no normalisation of separators, casing or spacing. Use an empty string when the text states no amount at all.',\n  'total_amount_idr is that same amount resolved to a plain number of rupiah.',\n  'Set needs_review to true whenever customer_name, customer_email or shipping_address is absent from the text, and give the reason in review_reason.'\n].join('\\n');\n\n// Tool definition lives here rather than in the HTTP node so that\n// \"Build Request B\" in Stage 2 reuses one source of truth.\nconst tools = [\n  {\n    name: 'extract_order',\n    description: 'Extract structured order data from raw customer text',\n    input_schema: {\n      type: 'object',\n      properties: {\n        customer_name: { type: 'string' },\n        customer_email: { type: 'string' },\n        customer_phone: { type: 'string' },\n        shipping_address: { type: 'string' },\n        items: {\n          type: 'array',\n          minItems: 1,\n          items: {\n            type: 'object',\n            properties: {\n              product: { type: 'string' },\n              size: { type: 'string' },\n              qty: { type: 'integer', minimum: 1 }\n            },\n            required: ['product', 'qty']\n          }\n        },\n        total_amount_idr: { type: 'number' },\n        amount_as_written: {\n          type: 'string',\n          description: \"The amount exactly as written in the source text, verbatim. Example: '2,4jt' or 'Rp 2.400.000'. Empty string if no amount present.\"\n        },\n        needs_review: { type: 'boolean' },\n        review_reason: { type: 'string' }\n      },\n      required: ['items', 'total_amount_idr', 'amount_as_written', 'needs_review']\n    }\n  }\n];\n\nconst request_body = {\n  model: 'claude-sonnet-5',\n  // Generous on purpose: stop_reason === \"max_tokens\" must mean real model\n  // drift (S5), not a budget we set too tightly.\n  max_tokens: 2048,\n  system,\n  tools,\n  tool_choice: { type: 'tool', name: 'extract_order' },\n  messages: [\n    {\n      role: 'user',\n      content: '<customer_text>\\n' + raw + '\\n</customer_text>'\n    }\n  ]\n};\n\nreturn {\n  json: {\n    raw_text: raw,\n    fixture_id: $json.fixture_id ?? null,\n    attempt: 1,\n    request_started_at: Date.now(),\n    request_body\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1568,
+        192
+      ],
+      "id": "7b488829-459a-448e-8bea-1d074d7e334a",
+      "name": "Build Request A1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request_body) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1808,
+        192
+      ],
+      "id": "5d75e2f9-b96c-45d6-834e-d34f83926937",
+      "name": "Claude Attempt ",
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_ME",
+          "name": "Anthropic API"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// D1: nothing in this node coerces, repairs or defaults anything.\n// block.input is passed through exactly as the model produced it, whatever\n// shape that is. Stage 2 decides whether it is acceptable. Silent\n// correction here would hide the model drift this pipeline exists to catch.\nconst res = $json ?? {};\n\n// Output of the HTTP node overwrites the item json, so the source text and\n// the start timestamp have to be pulled back from Build Request A.\nlet started = null;\nlet raw_text = null;\nlet fixture_id = null;\ntry {\n  const src = $('Build Request A1').item.json;\n  started = src.request_started_at ?? null;\n  raw_text = src.raw_text ?? null;\n  fixture_id = src.fixture_id ?? null;\n} catch (e) {\n  // Item pairing can break when the HTTP node emits an error item.\n  // Losing the metrics must not take the node down with it.\n}\n\nconst content = Array.isArray(res.content) ? res.content : [];\nconst block = content.find(\n  b => b && b.type === 'tool_use' && b.name === 'extract_order'\n) || null;\n\nlet api_error = null;\nif (res.error) {\n  api_error = typeof res.error === 'string' ? res.error : JSON.stringify(res.error);\n} else if (!Array.isArray(res.content)) {\n  api_error = 'Response carried no content array: ' + JSON.stringify(res).slice(0, 500);\n}\n\nconst usage = res.usage ?? {};\n\nreturn {\n  json: {\n    raw_text,\n    fixture_id,\n    attempt_count: 1,\n    tool_use_found: block !== null,\n    data: block ? block.input : null,\n    stop_reason: res.stop_reason ?? null,\n    input_tokens: usage.input_tokens ?? null,\n    output_tokens: usage.output_tokens ?? null,\n    // Includes the node-transition overhead, not purely wire time.\n    elapsed_ms: started === null ? null : Date.now() - started,\n    api_error,\n    // Stage 1 only, so the raw response can be pasted back for review.\n    // This field is removed in Stage 2.\n    raw_response: res\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2048,
+        192
+      ],
+      "id": "499c4869-8196-400b-ba07-6489ddf06b56",
+      "name": "Extract Tool Input1"
+    }
+  ],
+  "connections": {
+    "Order Intake": {
+      "main": [
+        [
+          {
+            "node": "Build Request A1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test Fixtures1": {
+      "main": [
+        [
+          {
+            "node": "Build Request A1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Request A1": {
+      "main": [
+        [
+          {
+            "node": "Claude Attempt ",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude Attempt ": {
+      "main": [
+        [
+          {
+            "node": "Extract Tool Input1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "active": false
+}
